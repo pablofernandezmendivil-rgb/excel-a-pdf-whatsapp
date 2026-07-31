@@ -21,6 +21,15 @@ const PASSWORD_MSG = process.env.PASSWORD_MSG || 'Error archivo con contraseña'
 // Token opcional para proteger el endpoint (Make lo manda en header x-auth-token).
 const AUTH_TOKEN = (process.env.CONVERT_AUTH_TOKEN || '').trim();
 
+// --- Green API (para que el convertidor pueda ENVIAR el PDF al grupo) ---
+// Enviar NO choca con el webhook de Make (eso solo aplica a recibir).
+const FormData = require('form-data');
+const GA_ID = process.env.GREENAPI_ID_INSTANCE;
+const GA_TOKEN = process.env.GREENAPI_API_TOKEN;
+const GA_API = (process.env.GREENAPI_API_URL || 'https://api.green-api.com').replace(/\/$/, '');
+const GA_MEDIA = (process.env.GREENAPI_MEDIA_URL || 'https://media.green-api.com').replace(/\/$/, '');
+const DEFAULT_CHAT_ID = (process.env.DEFAULT_CHAT_ID || '').trim();
+
 const TMP = path.join(os.tmpdir(), 'convertidor');
 fs.mkdirSync(TMP, { recursive: true });
 
@@ -58,6 +67,31 @@ function runConverter(inputPath, outputPath) {
     proc.on('error', (err) => resolve({ code: -1, stderr: err.message }));
     proc.on('close', (code) => resolve({ code, stderr }));
   });
+}
+
+async function downloadToFile(url, destPath) {
+  const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 60000 });
+  fs.writeFileSync(destPath, Buffer.from(r.data));
+}
+
+async function waSendPdf(chatId, pdfPath, fileName) {
+  const form = new FormData();
+  form.append('chatId', chatId);
+  form.append('caption', '');
+  form.append('fileName', fileName);
+  form.append('file', fs.createReadStream(pdfPath), { filename: fileName });
+  const url = `${GA_MEDIA}/waInstance${GA_ID}/sendFileByUpload/${GA_TOKEN}`;
+  await axios.post(url, form, {
+    headers: form.getHeaders(),
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+    timeout: 120000,
+  });
+}
+
+async function waSendText(chatId, message) {
+  const url = `${GA_API}/waInstance${GA_ID}/sendMessage/${GA_TOKEN}`;
+  await axios.post(url, { chatId, message }, { timeout: 20000 });
 }
 
 const app = express();
@@ -136,6 +170,58 @@ app.post('/convert', upload.single('file'), async (req, res) => {
     doCleanup();
     log('Error inesperado:', err.message);
     if (!res.headersSent) res.status(500).json({ ok: false, reason: 'error', message: err.message });
+  }
+});
+
+// Todo-en-uno para Make: recibe la info del archivo, convierte y ENVÍA el PDF
+// al grupo por Green API. Make solo necesita UN módulo HTTP que llame aquí.
+app.post('/convert-and-send', async (req, res) => {
+  if (AUTH_TOKEN && (req.headers['x-auth-token'] || '') !== AUTH_TOKEN) {
+    return res.status(401).json({ ok: false, reason: 'unauthorized' });
+  }
+  if (!GA_ID || !GA_TOKEN) {
+    return res.status(500).json({ ok: false, reason: 'greenapi_no_configurado' });
+  }
+
+  const url = req.body.fileUrl || req.body.downloadUrl;
+  const chatId = (req.body.chatId || DEFAULT_CHAT_ID || '').trim();
+  const caption = req.body.caption || '';
+  const originalName = req.body.fileName || 'archivo.xlsx';
+  const ext = path.extname(originalName).toLowerCase() || '.xlsx';
+
+  if (!url || !chatId) return res.status(400).json({ ok: false, reason: 'faltan_datos' });
+
+  // Cualquier cosa que no sea Excel/Word -> silencio (no se envía nada).
+  if (!OK_EXT.has(ext)) return res.status(200).json({ ok: false, reason: 'unsupported' });
+
+  const inputPath = path.join(TMP, `${Date.now()}${ext}`);
+  const outputPath = inputPath + '.pdf';
+  const cleanup = () => [inputPath, outputPath].forEach((p) => fs.rm(p, { force: true }, () => {}));
+
+  try {
+    await downloadToFile(url, inputPath);
+    const { code, stderr } = await runConverter(inputPath, outputPath);
+
+    if (code === EXIT_PASSWORD) {
+      await waSendText(chatId, PASSWORD_MSG);
+      cleanup();
+      return res.status(200).json({ ok: false, reason: 'password' });
+    }
+    if (code !== EXIT_OK || !fs.existsSync(outputPath)) {
+      cleanup();
+      log(`Error conversión "${originalName}" (code ${code}): ${stderr || ''}`.trim());
+      return res.status(200).json({ ok: false, reason: 'error' });
+    }
+
+    const pdfName = pdfNameFrom(caption, originalName);
+    await waSendPdf(chatId, outputPath, pdfName);
+    cleanup();
+    log(`✅ Enviado a ${chatId}: "${pdfName}"`);
+    return res.status(200).json({ ok: true, pdfName });
+  } catch (err) {
+    cleanup();
+    log('Error convert-and-send:', err.message);
+    return res.status(500).json({ ok: false, reason: 'error', message: err.message });
   }
 });
 
