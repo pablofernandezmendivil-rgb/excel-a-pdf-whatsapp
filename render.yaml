@@ -1,23 +1,14 @@
-# Blueprint de Render. Crea un Background Worker con Docker.
-# En Render: New + -> Blueprint -> conecta el repo con estos archivos.
-# Luego llena las variables marcadas (sync:false) en el panel de Render.
+# Blueprint de Render. Servicio Web (Docker) que expone el convertidor por HTTP.
+# Make le hace POST /convert con el Excel/Word y recibe el PDF de vuelta.
+# No necesita credenciales de WhatsApp: Make se encarga de enviar y guardar.
 services:
-  - type: worker
+  - type: web
     name: pdf-convertidor
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: starter
+    healthCheckPath: /health
     envVars:
-      - key: GREENAPI_ID_INSTANCE
-        sync: false
-      - key: GREENAPI_API_TOKEN
-        sync: false
-      - key: GREENAPI_API_URL
-        value: https://7107.api.greenapi.com
-      - key: GREENAPI_MEDIA_URL
-        value: https://7107.api.greenapi.com
-      - key: ALLOWED_CHAT_ID
-        sync: false
       - key: PYTHON_BIN
         value: python3
       - key: PASSWORD_MSG

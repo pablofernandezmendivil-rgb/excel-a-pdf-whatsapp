@@ -29,5 +29,5 @@ COPY . .
 
 ENV PYTHON_BIN=python3
 
-# El convertidor escucha el grupo por polling; no necesita exponer puertos.
-CMD ["node", "bot.js"]
+# Servicio HTTP: Make le manda el Excel/Word y recibe el PDF.
+CMD ["node", "server.js"]

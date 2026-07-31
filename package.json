@@ -1,15 +1,18 @@
 {
   "name": "excel-a-pdf-whatsapp",
   "version": "2.0.0",
-  "description": "Bot que convierte a PDF los Excel y Word subidos a un grupo de WhatsApp (Green API). Primera hoja, ancho de una página, conserva formato e imágenes.",
-  "main": "bot.js",
+  "description": "Convertidor Excel/Word -> PDF (primera hoja, ancho de una página, conserva formato e imágenes). Servicio HTTP para orquestar desde Make.",
+  "main": "server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node server.js",
+    "start:bot": "node bot.js"
   },
   "dependencies": {
     "axios": "^1.7.7",
     "dotenv": "^16.4.5",
-    "form-data": "^4.0.1"
+    "express": "^4.22.2",
+    "form-data": "^4.0.1",
+    "multer": "^1.4.5-lts.1"
   }
 }
