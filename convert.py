@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Convierte un Excel o Word a PDF conservando formato e imagenes (LibreOffice UNO).
-Excel: solo la primera pestana, columnas ajustadas al ancho de UNA pagina.
+Excel: solo la primera pestana, ajustada a UNA sola pagina (ancho y alto).
 Word: se convierte tal cual.
 Contrasena -> exit 10.
 
@@ -151,9 +151,13 @@ def _prepare_spreadsheet(doc):
                 ps.setPropertyValue(pname, pval)
             except Exception:
                 pass
+        # Ajustar TODO a UNA sola pagina: ancho=1 pagina y alto=1 pagina.
+        # (Antes el alto quedaba libre con Y=0, y si el contenido pasaba de
+        # una hoja por poco, brincaba a otra pagina dejando un gran espacio
+        # en blanco entre hoja y hoja.)
         try:
             ps.setPropertyValue("ScaleToPagesX", 1)
-            ps.setPropertyValue("ScaleToPagesY", 0)
+            ps.setPropertyValue("ScaleToPagesY", 1)
         except Exception:
             try:
                 ps.setPropertyValue("ScaleToPages", 1)
