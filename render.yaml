@@ -1,8 +1,8 @@
-# Blueprint de Render. Servicio Web (Docker) que expone el convertidor por HTTP.
-# Endpoints:
-#   POST /convert           -> devuelve el PDF (Make maneja el envío)
-#   POST /convert-and-send  -> convierte y ENVÍA el PDF al grupo por Green API
-#                              (Make solo necesita UN módulo que llame aquí)
+# Blueprint de Render. Servicio Web (Docker) del convertidor.
+#   POST /convert           -> devuelve el PDF
+#   POST /convert-and-send  -> convierte y envía el PDF al grupo por Green API
+# Si un Excel viene en chino y hay ANTHROPIC_API_KEY, traduce (chino->inglés)
+# conservando formato/imágenes y arma PDF: traducido arriba + original abajo.
 services:
   - type: web
     name: pdf-convertidor
@@ -23,6 +23,12 @@ services:
         value: https://7107.api.greenapi.com
       - key: DEFAULT_CHAT_ID
         value: 120363430907627721@g.us
-      # El token se pone en el panel de Render (no en el repo).
+      - key: TRANSLATE_TARGET_LANG
+        value: English
+      - key: CLAUDE_MODEL
+        value: claude-3-5-sonnet-latest
+      # Secretos (se ponen en el panel de Render, no en el repo):
       - key: GREENAPI_API_TOKEN
+        sync: false
+      - key: ANTHROPIC_API_KEY
         sync: false
