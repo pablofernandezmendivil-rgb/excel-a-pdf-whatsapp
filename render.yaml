@@ -26,7 +26,7 @@ services:
       - key: TRANSLATE_TARGET_LANG
         value: English
       - key: CLAUDE_MODEL
-        value: claude-3-5-sonnet-latest
+        value: claude-sonnet-5
       # Secretos (se ponen en el panel de Render, no en el repo):
       - key: GREENAPI_API_TOKEN
         sync: false

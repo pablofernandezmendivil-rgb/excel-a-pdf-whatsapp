@@ -28,7 +28,7 @@ from xml.sax.saxutils import escape
 CJK = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 T_RE = re.compile(r"(<t\b[^>]*>)(.*?)(</t>)", re.DOTALL)
 TARGET_LANG = os.environ.get("TRANSLATE_TARGET_LANG", "English")
-MODEL = os.environ.get("CLAUDE_MODEL", "claude-3-5-haiku-latest")
+MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 BATCH = 50
 
 
