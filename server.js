@@ -21,6 +21,7 @@ const PORT = process.env.PORT || 3000;
 const PYTHON_BIN = process.env.PYTHON_BIN || 'python3';
 const CONVERTER = path.join(__dirname, 'convert.py');
 const TRANSLATOR = path.join(__dirname, 'translate_xlsx.py');
+const TRANSLATOR_PDF = path.join(__dirname, 'translate_pdf.py');
 const PASSWORD_MSG = process.env.PASSWORD_MSG || 'Error archivo con contraseña';
 const AUTH_TOKEN = (process.env.CONVERT_AUTH_TOKEN || '').trim();
 
@@ -38,7 +39,9 @@ fs.mkdirSync(TMP, { recursive: true });
 
 const EXCEL_EXT = ['.xlsx', '.xls', '.xlsm', '.xlsb', '.ods', '.csv', '.xltx'];
 const WORD_EXT = ['.doc', '.docx', '.docm', '.odt', '.rtf', '.dotx'];
-const OK_EXT = new Set([...EXCEL_EXT, ...WORD_EXT]);
+// PDF: no se convierte; solo se traduce si viene en chino (si no, silencio).
+const PDF_EXT = ['.pdf'];
+const OK_EXT = new Set([...EXCEL_EXT, ...WORD_EXT, ...PDF_EXT]);
 // Solo estos formatos (OOXML) se pueden traducir conservando todo.
 const TRANSLATABLE_EXT = new Set(['.xlsx', '.xlsm', '.xltx']);
 
@@ -73,6 +76,7 @@ function run(cmd, args) {
 
 const runConverter = (inp, outp) => run(PYTHON_BIN, [CONVERTER, inp, outp]);
 const runTranslator = (inp, outp) => run(PYTHON_BIN, [TRANSLATOR, inp, outp]);
+const runTranslatorPdf = (inp, outp) => run(PYTHON_BIN, [TRANSLATOR_PDF, inp, outp]);
 const runPdfUnite = (a, b, outp) => run('pdfunite', [a, b, outp]);
 
 async function downloadToFile(url, destPath) {
@@ -104,6 +108,32 @@ async function waSendText(chatId, message) {
  * Si es Excel en chino (y hay IA), el PDF = traducido (arriba) + original (abajo).
  */
 async function buildPdf(inputPath, ext, stamp) {
+  // --- PDF de entrada: no se convierte; solo se traduce si viene en chino. ---
+  if (ext === '.pdf') {
+    const extras = [];
+    if (!TRANSLATE_ENABLED) return { status: 'skip', extras }; // sin IA: no hacer nada
+    const transPdf = path.join(TMP, `${stamp}_en.pdf`);
+    const finalPdf = path.join(TMP, `${stamp}_final.pdf`);
+    extras.push(transPdf, finalPdf);
+    try {
+      const tr = await runTranslatorPdf(inputPath, transPdf);
+      if (tr.code === 0 && fs.existsSync(transPdf)) {
+        // traducido arriba + original (chino) abajo
+        const u = await runPdfUnite(transPdf, inputPath, finalPdf);
+        if (u.code === 0 && fs.existsSync(finalPdf)) {
+          return { status: 'ok', pdfPath: finalPdf, extras };
+        }
+        return { status: 'skip', extras }; // fallo al unir -> mejor no enviar nada
+      }
+      if (tr.code === 2) return { status: 'skip', extras }; // PDF no chino -> silencio
+      log(`Traducción PDF no aplicada (code ${tr.code}): ${tr.stderr || ''}`.trim());
+      return { status: 'skip', extras }; // error -> silencio (no molestar el grupo)
+    } catch (e) {
+      log('Error en traducción PDF (silencio):', e.message);
+      return { status: 'skip', extras };
+    }
+  }
+
   const origPdf = path.join(TMP, `${stamp}_orig.pdf`);
   const extras = [origPdf];
 
@@ -172,7 +202,7 @@ app.post('/convert', upload.single('file'), async (req, res) => {
     cleanup.push(...r.extras);
     const done = () => cleanup.forEach((p) => fs.rm(p, { force: true }, () => {}));
     if (r.status === 'password') { done(); return res.status(200).json({ ok: false, reason: 'password', message: PASSWORD_MSG }); }
-    if (r.status !== 'ok' || !r.pdfPath) { done(); return res.status(r.status === 'unsupported' ? 200 : 500).json({ ok: false, reason: r.status }); }
+    if (r.status !== 'ok' || !r.pdfPath) { done(); const soft = (r.status === 'unsupported' || r.status === 'skip'); return res.status(soft ? 200 : 500).json({ ok: false, reason: r.status }); }
     const pdfName = pdfNameFrom(caption, originalName);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('X-Pdf-Filename', encodeURIComponent(pdfName));
