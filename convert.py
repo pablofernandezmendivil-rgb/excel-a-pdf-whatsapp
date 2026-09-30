@@ -131,6 +131,42 @@ def convert(input_path, output_path):
         shutil.rmtree(profile_dir, ignore_errors=True)
 
 
+# Si para meter todo en UNA hoja habria que encoger a menos de este % del
+# tamano que ya cabe a lo ancho, mejor NO encoger tanto: usar varias hojas
+# legibles. (1.0 = igual; 0.72 = se permite hasta ~28% de encogido extra.)
+ONE_PAGE_FLOOR = 0.72
+# Flags de contenido real (valor, fecha, texto, formula) para ignorar celdas
+# con solo formato/color ("basura") al medir el area de datos.
+CONTENT_FLAGS = 1 | 2 | 4 | 16
+
+
+def _fit_width_only(ps):
+    ps.setPropertyValue("ScaleToPagesX", 1)
+    ps.setPropertyValue("ScaleToPagesY", 0)
+
+
+def _fit_one_page(ps):
+    try:
+        ps.setPropertyValue("ScaleToPagesX", 1)
+        ps.setPropertyValue("ScaleToPagesY", 1)
+    except Exception:
+        ps.setPropertyValue("ScaleToPages", 1)
+
+
+def _data_bounds(sheet):
+    """Ultima columna/fila con datos REALES (ignora celdas solo con formato)."""
+    try:
+        ranges = sheet.queryContentCells(CONTENT_FLAGS)
+        addrs = ranges.RangeAddresses
+        if not addrs:
+            return None
+        max_col = max(a.EndColumn for a in addrs)
+        max_row = max(a.EndRow for a in addrs)
+        return max_col, max_row
+    except Exception:
+        return None
+
+
 def _prepare_spreadsheet(doc):
     sheets = doc.Sheets
     names = list(sheets.ElementNames)
@@ -143,6 +179,7 @@ def _prepare_spreadsheet(doc):
         except Exception:
             pass
     try:
+        import uno
         sheet = sheets.getByName(first)
         page_styles = doc.StyleFamilies.getByName("PageStyles")
         ps = page_styles.getByName(sheet.PageStyle)
@@ -151,20 +188,57 @@ def _prepare_spreadsheet(doc):
                 ps.setPropertyValue(pname, pval)
             except Exception:
                 pass
-        # Ajustar TODO a UNA sola pagina: ancho=1 pagina y alto=1 pagina.
-        # (Antes el alto quedaba libre con Y=0, y si el contenido pasaba de
-        # una hoja por poco, brincaba a otra pagina dejando un gran espacio
-        # en blanco entre hoja y hoja.)
+
+        bounds = _data_bounds(sheet)
+        if not bounds:
+            # sin datos: comportamiento simple (una hoja)
+            _fit_one_page(ps)
+            return
+        max_col, max_row = bounds
+
+        # Recortar el area de impresion a los datos reales (quita "basura"
+        # que inflaria el tamano y encogeria de mas).
         try:
-            ps.setPropertyValue("ScaleToPagesX", 1)
-            ps.setPropertyValue("ScaleToPagesY", 1)
+            addr = uno.createUnoStruct("com.sun.star.table.CellRangeAddress")
+            addr.Sheet = 0
+            addr.StartColumn = 0
+            addr.StartRow = 0
+            addr.EndColumn = max_col
+            addr.EndRow = max_row
+            sheet.setPrintAreas((addr,))
         except Exception:
-            try:
-                ps.setPropertyValue("ScaleToPages", 1)
-            except Exception:
-                pass
+            pass
+
+        # Medir contenido vs area imprimible de la hoja (1/100 mm).
+        cols = sheet.Columns
+        rows = sheet.Rows
+        content_w = sum(cols.getByIndex(c).Width for c in range(max_col + 1))
+        content_h = sum(rows.getByIndex(r).Height for r in range(max_row + 1))
+        printable_w = ps.Width - ps.LeftMargin - ps.RightMargin
+        printable_h = ps.Height - ps.TopMargin - ps.BottomMargin
+
+        if content_w <= 0 or content_h <= 0 or printable_w <= 0 or printable_h <= 0:
+            _fit_one_page(ps)
+            return
+
+        # Escala para que las columnas quepan a lo ancho (nunca agrandar).
+        s_width = min(1.0, printable_w / content_w)
+        # Escala para meter TODO en una sola hoja.
+        s_one = min(1.0, printable_w / content_w, printable_h / content_h)
+        ratio = s_one / s_width if s_width > 0 else 0.0
+
+        if ratio >= ONE_PAGE_FLOOR:
+            # Cabe en una hoja con un ajuste leve -> una sola hoja limpia.
+            _fit_one_page(ps)
+        else:
+            # Encogeria demasiado -> ancho a una hoja, alto en varias (legible).
+            _fit_width_only(ps)
     except Exception:
-        pass
+        # Ante cualquier problema, comportamiento seguro: una sola hoja.
+        try:
+            _fit_one_page(ps)
+        except Exception:
+            pass
 
 
 def main():
