@@ -7,8 +7,16 @@ mismo grupo. Nada de texto, solo el archivo.
 ## Reglas de conversión (así opera)
 
 - **Solo responde en el grupo configurado** (`ALLOWED_CHAT_ID`).
-- **Excel**: se convierte **solo la primera pestaña** (sin importar su nombre).
-  Las demás hojas y las vacías se descartan.
+- **Excel**: se convierte **solo la primera pestaña VISIBLE** (sin importar su
+  nombre). Las demás hojas y las vacías se descartan. Una pestaña **oculta nunca
+  sale** en el PDF (ahí suelen ir costos, margen y proveedor): antes, si la
+  primera estaba oculta, salía ésa.
+- **Modo `cliente`** (`modo=cliente` en el cuerpo o en la URL de `/convert` y
+  `/convert-and-send`; lo usa el cotizador para las cotizaciones al cliente de
+  SLH Client Quotes): salen **todas las pestañas visibles, en su orden**, las
+  ocultas se quitan (y si no se puede, no hay PDF), las filas con texto ajustado
+  **crecen** hasta que el texto quepa (nunca se encogen), y **no se traduce**.
+  Sin `modo`, todo es como siempre.
 - **Ancho de una hoja**: todas las columnas se ajustan al **ancho de una sola
   página**; hacia abajo usa las páginas que hagan falta. Se **respeta la
   orientación** original del archivo.

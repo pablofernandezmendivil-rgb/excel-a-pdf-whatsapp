@@ -74,7 +74,18 @@ function run(cmd, args) {
   });
 }
 
-const runConverter = (inp, outp) => run(PYTHON_BIN, [CONVERTER, inp, outp]);
+// modo 'cliente': todas las pestanas visibles y filas que crecen (convert.py).
+const MODOS = new Set(['primera', 'cliente']);
+const runConverter = (inp, outp, modo) =>
+  run(PYTHON_BIN, [CONVERTER, inp, outp].concat(modo === 'cliente' ? ['--modo=cliente'] : []));
+
+// El modo viene en el cuerpo o en la URL; vacio = 'primera', lo de siempre.
+// Devuelve null si trae algo que no es un modo.
+function leeModo(req) {
+  const crudo = String((req.body && req.body.modo) || (req.query && req.query.modo) || '').trim().toLowerCase();
+  if (!crudo) return 'primera';
+  return MODOS.has(crudo) ? crudo : null;
+}
 const runTranslator = (inp, outp) => run(PYTHON_BIN, [TRANSLATOR, inp, outp]);
 const runTranslatorPdf = (inp, outp) => run(PYTHON_BIN, [TRANSLATOR_PDF, inp, outp]);
 const runPdfUnite = (a, b, outp) => run('pdfunite', [a, b, outp]);
@@ -106,12 +117,15 @@ async function waSendText(chatId, message) {
  * Construye el PDF final a partir del archivo de entrada.
  * Devuelve { status: 'ok'|'password'|'unsupported'|'error', pdfPath, extras: [] }
  * Si es Excel en chino (y hay IA), el PDF = traducido (arriba) + original (abajo).
+ * En modo 'cliente' no se traduce: es la cotizacion que va al cliente, y un
+ * caracter chino suelto la duplicaria con una version traducida por la IA.
  */
-async function buildPdf(inputPath, ext, stamp) {
+async function buildPdf(inputPath, ext, stamp, modo = 'primera') {
+  const cliente = modo === 'cliente';
   // --- PDF de entrada: no se convierte; solo se traduce si viene en chino. ---
   if (ext === '.pdf') {
     const extras = [];
-    if (!TRANSLATE_ENABLED) return { status: 'skip', extras }; // sin IA: no hacer nada
+    if (!TRANSLATE_ENABLED || cliente) return { status: 'skip', extras }; // sin IA o modo cliente: no hacer nada
     const transPdf = path.join(TMP, `${stamp}_en.pdf`);
     const finalPdf = path.join(TMP, `${stamp}_final.pdf`);
     extras.push(transPdf, finalPdf);
@@ -137,7 +151,7 @@ async function buildPdf(inputPath, ext, stamp) {
   const origPdf = path.join(TMP, `${stamp}_orig.pdf`);
   const extras = [origPdf];
 
-  const conv = await runConverter(inputPath, origPdf);
+  const conv = await runConverter(inputPath, origPdf, modo);
   if (conv.code === EXIT_PASSWORD) return { status: 'password', extras };
   if (conv.code === EXIT_UNSUPPORTED) return { status: 'unsupported', extras };
   if (conv.code !== EXIT_OK || !fs.existsSync(origPdf)) {
@@ -146,7 +160,7 @@ async function buildPdf(inputPath, ext, stamp) {
   }
 
   // ¿Traducir? Solo Excel OOXML + IA disponible.
-  if (TRANSLATE_ENABLED && TRANSLATABLE_EXT.has(ext)) {
+  if (TRANSLATE_ENABLED && !cliente && TRANSLATABLE_EXT.has(ext)) {
     const transXlsx = path.join(TMP, `${stamp}_en${ext}`);
     const transPdf = path.join(TMP, `${stamp}_en.pdf`);
     const finalPdf = path.join(TMP, `${stamp}_final.pdf`);
@@ -188,6 +202,8 @@ app.post('/convert', upload.single('file'), async (req, res) => {
   const caption = req.body.caption || req.query.caption || '';
   const originalName = req.body.fileName || req.query.fileName || (req.file && req.file.originalname) || 'archivo.xlsx';
   const ext = path.extname(originalName).toLowerCase() || '.xlsx';
+  const modo = leeModo(req);
+  if (!modo) return res.status(400).json({ ok: false, reason: 'modo_desconocido' });
   const stamp = `${Date.now()}_${process.hrtime()[1]}`;
   let inputPath;
   const cleanup = [];
@@ -198,7 +214,7 @@ app.post('/convert', upload.single('file'), async (req, res) => {
     cleanup.push(inputPath);
     if (!OK_EXT.has(ext)) { cleanup.forEach((p) => fs.rm(p, { force: true }, () => {})); return res.status(200).json({ ok: false, reason: 'unsupported' }); }
 
-    const r = await buildPdf(inputPath, ext, stamp);
+    const r = await buildPdf(inputPath, ext, stamp, modo);
     cleanup.push(...r.extras);
     const done = () => cleanup.forEach((p) => fs.rm(p, { force: true }, () => {}));
     if (r.status === 'password') { done(); return res.status(200).json({ ok: false, reason: 'password', message: PASSWORD_MSG }); }
@@ -233,6 +249,8 @@ app.post('/convert-and-send', async (req, res) => {
   const originalName = req.body.fileName || 'archivo.xlsx';
   const ext = path.extname(originalName).toLowerCase() || '.xlsx';
   if (!url || !chatId) return res.status(400).json({ ok: false, reason: 'faltan_datos' });
+  const modo = leeModo(req);
+  if (!modo) return res.status(400).json({ ok: false, reason: 'modo_desconocido' });
   if (!OK_EXT.has(ext)) return res.status(200).json({ ok: false, reason: 'unsupported' });
 
   const stamp = `${Date.now()}_${process.hrtime()[1]}`;
@@ -242,7 +260,7 @@ app.post('/convert-and-send', async (req, res) => {
 
   try {
     await downloadToFile(url, inputPath);
-    const r = await buildPdf(inputPath, ext, stamp);
+    const r = await buildPdf(inputPath, ext, stamp, modo);
     cleanup.push(...r.extras);
 
     if (r.status === 'password') { await waSendText(chatId, PASSWORD_MSG); done(); return res.status(200).json({ ok: false, reason: 'password' }); }

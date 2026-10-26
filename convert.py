@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
 Convierte un Excel o Word a PDF conservando formato e imagenes (LibreOffice UNO).
-Excel: solo la primera pestana, ajustada a UNA sola pagina (ancho y alto).
+Excel, dos modos:
+  - "primera" (el de siempre): la primera pestana VISIBLE, ajustada a una
+    sola pagina (ancho y alto) si cabe sin encoger de mas.
+  - "cliente": TODAS las pestanas visibles, en su orden, y las filas con texto
+    ajustado crecen lo que haga falta para que no se corte (nunca se encogen).
+  En los dos, una pestana oculta NUNCA sale en el PDF: ahi suelen ir costos,
+  margenes y el proveedor. Si no se puede asegurar eso, en modo "cliente" no
+  sale PDF (exit 1).
 Word: se convierte tal cual.
 Contrasena -> exit 10.
 
-Uso: python3 convert.py <entrada> <salida.pdf>
+Uso: python3 convert.py <entrada> <salida.pdf> [--modo=cliente]
 """
 import os
 import sys
@@ -50,7 +57,12 @@ def _find_soffice():
     raise RuntimeError("No se encontro LibreOffice.")
 
 
-def convert(input_path, output_path):
+MODOS = ("primera", "cliente")
+
+
+def convert(input_path, output_path, modo="primera"):
+    if modo not in MODOS:
+        raise ValueError("modo desconocido: %r" % (modo,))
     import uno
     import unohelper
     from com.sun.star.beans import PropertyValue
@@ -103,7 +115,7 @@ def convert(input_path, output_path):
             raise RuntimeError("No se pudo abrir el documento.")
         is_calc = doc.supportsService("com.sun.star.sheet.SpreadsheetDocument")
         if is_calc:
-            _prepare_spreadsheet(doc)
+            _prepare_spreadsheet(doc, modo)
             filter_name = "calc_pdf_Export"
         else:
             filter_name = "writer_pdf_Export"
@@ -167,20 +179,74 @@ def _data_bounds(sheet):
         return None
 
 
-def _prepare_spreadsheet(doc):
-    sheets = doc.Sheets
-    names = list(sheets.ElementNames)
-    if not names:
-        return
-    first = names[0]
-    for n in names[1:]:
+# Banderas de queryContentCells para texto: cadenas y formulas (una formula
+# puede dar texto). Sirven para hallar las celdas con texto ajustado.
+TEXT_FLAGS = 4 | 16
+
+
+def _es_visible(sheet, estricto):
+    """IsVisible de la pestana.
+
+    Si no se puede leer: en modo estricto truena (mejor no sacar PDF que sacar
+    una pestana oculta); si no, se asume visible, que es lo que pasaba antes.
+    """
+    try:
+        return bool(sheet.IsVisible)
+    except Exception:
+        if estricto:
+            raise
+        return True
+
+
+def _crece_filas(sheet):
+    """Las filas con texto ajustado crecen hasta que el texto quepa.
+
+    Nunca se encogen: una fila alta puede traer una foto, y la altura optima
+    de LibreOffice no ve las fotos. Las filas ocultas no se tocan. (LibreOffice
+    tampoco mide las celdas combinadas: ese texto queda como venga.)
+    Devuelve cuantas filas crecieron.
+    """
+    filas = set()
+    try:
+        celdas = sheet.queryContentCells(TEXT_FLAGS).getCells().createEnumeration()
+        while celdas.hasMoreElements():
+            c = celdas.nextElement()
+            try:
+                if c.IsTextWrapped:
+                    filas.add(c.CellAddress.Row)
+            except Exception:
+                pass
+    except Exception:
+        return 0
+    rows = sheet.Rows
+    crecieron = 0
+    for r in sorted(filas):
         try:
-            sheets.removeByName(n)
+            row = rows.getByIndex(r)
+            if not row.IsVisible:
+                continue
+            antes = row.Height
+            row.OptimalHeight = True
+            despues = row.Height
+            if despues < antes:
+                row.Height = antes
+            elif despues > antes:
+                crecieron += 1
         except Exception:
             pass
+    return crecieron
+
+
+def _ajusta_pagina(doc, sheet, idx, sola=True):
+    """Area de impresion y escala de una pestana.
+
+    `sola` = la pestana tiene su propio estilo de pagina. Si lo comparte con
+    otra, la escala de una seria la de todas: ahi se usa lo seguro, todas las
+    columnas a lo ancho de la hoja y hacia abajo las paginas que hagan falta.
+    """
+    ps = None
     try:
         import uno
-        sheet = sheets.getByName(first)
         page_styles = doc.StyleFamilies.getByName("PageStyles")
         ps = page_styles.getByName(sheet.PageStyle)
         for pname, pval in (("PageScale", 0), ("ScaleToPages", 0)):
@@ -192,7 +258,10 @@ def _prepare_spreadsheet(doc):
         bounds = _data_bounds(sheet)
         if not bounds:
             # sin datos: comportamiento simple (una hoja)
-            _fit_one_page(ps)
+            if sola:
+                _fit_one_page(ps)
+            else:
+                _fit_width_only(ps)
             return
         max_col, max_row = bounds
 
@@ -200,7 +269,7 @@ def _prepare_spreadsheet(doc):
         # que inflaria el tamano y encogeria de mas).
         try:
             addr = uno.createUnoStruct("com.sun.star.table.CellRangeAddress")
-            addr.Sheet = 0
+            addr.Sheet = idx
             addr.StartColumn = 0
             addr.StartRow = 0
             addr.EndColumn = max_col
@@ -208,6 +277,10 @@ def _prepare_spreadsheet(doc):
             sheet.setPrintAreas((addr,))
         except Exception:
             pass
+
+        if not sola:
+            _fit_width_only(ps)
+            return
 
         # Medir contenido vs area imprimible de la hoja (1/100 mm).
         cols = sheet.Columns
@@ -234,23 +307,85 @@ def _prepare_spreadsheet(doc):
             # Encogeria demasiado -> ancho a una hoja, alto en varias (legible).
             _fit_width_only(ps)
     except Exception:
-        # Ante cualquier problema, comportamiento seguro: una sola hoja.
+        # Ante cualquier problema, comportamiento seguro.
         try:
-            _fit_one_page(ps)
+            if sola:
+                _fit_one_page(ps)
+            else:
+                _fit_width_only(ps)
         except Exception:
             pass
 
 
+def _prepare_spreadsheet(doc, modo="primera"):
+    sheets = doc.Sheets
+    names = list(sheets.ElementNames)
+    if not names:
+        return
+    cliente = (modo == "cliente")
+    visibles = [n for n in names if _es_visible(sheets.getByName(n), cliente)]
+
+    if not cliente:
+        # La primera pestana VISIBLE. Antes era la primera a secas, y si estaba
+        # oculta (costos, margen, proveedor) salia ESA en el PDF.
+        first = visibles[0] if visibles else names[0]
+        for n in names:
+            if n != first:
+                try:
+                    sheets.removeByName(n)
+                except Exception:
+                    pass
+        _ajusta_pagina(doc, sheets.getByName(first), 0, True)
+        return
+
+    # Modo cliente: todas las visibles, en su orden; las ocultas se QUITAN, y
+    # si no se puede asegurar que no quedo ninguna, no hay PDF.
+    if not visibles:
+        raise RuntimeError("el libro no tiene ninguna pestana visible")
+    for n in names:
+        if n not in visibles:
+            sheets.removeByName(n)
+    quedan = list(sheets.ElementNames)
+    if quedan != visibles or not all(_es_visible(sheets.getByName(n), True) for n in quedan):
+        raise RuntimeError("no pude quitar las pestanas ocultas")
+
+    estilos = {}
+    for n in quedan:
+        estilos.setdefault(sheets.getByName(n).PageStyle, []).append(n)
+    for i, n in enumerate(quedan):
+        sheet = sheets.getByName(n)
+        _crece_filas(sheet)
+        _ajusta_pagina(doc, sheet, i, len(estilos[sheet.PageStyle]) == 1)
+
+
+def _lee_modo(args):
+    """`--modo=cliente` (o `--modo=primera`) despues de entrada y salida."""
+    modo = "primera"
+    for a in args:
+        if a.startswith("--modo="):
+            modo = a.split("=", 1)[1].strip().lower()
+        else:
+            raise ValueError("argumento desconocido: %r" % (a,))
+    if modo not in MODOS:
+        raise ValueError("modo desconocido: %r" % (modo,))
+    return modo
+
+
 def main():
-    if len(sys.argv) != 3:
-        sys.stderr.write("Uso: python3 convert.py <entrada> <salida.pdf>\n")
+    if len(sys.argv) not in (3, 4):
+        sys.stderr.write("Uso: python3 convert.py <entrada> <salida.pdf> [--modo=cliente]\n")
         return EXIT_ERROR
     inp, outp = sys.argv[1], sys.argv[2]
+    try:
+        modo = _lee_modo(sys.argv[3:])
+    except ValueError as e:
+        sys.stderr.write("Error: %s\n" % e)
+        return EXIT_ERROR
     if not os.path.exists(inp):
         sys.stderr.write("No existe: %s\n" % inp)
         return EXIT_ERROR
     try:
-        code = convert(inp, outp)
+        code = convert(inp, outp, modo)
         if code == EXIT_OK and not os.path.exists(outp):
             return EXIT_ERROR
         return code
