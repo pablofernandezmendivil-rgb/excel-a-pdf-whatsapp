@@ -203,7 +203,10 @@ app.post('/convert', upload.single('file'), async (req, res) => {
   const originalName = req.body.fileName || req.query.fileName || (req.file && req.file.originalname) || 'archivo.xlsx';
   const ext = path.extname(originalName).toLowerCase() || '.xlsx';
   const modo = leeModo(req);
-  if (!modo) return res.status(400).json({ ok: false, reason: 'modo_desconocido' });
+  if (!modo) {
+    if (req.file) fs.rm(req.file.path, { force: true }, () => {});
+    return res.status(400).json({ ok: false, reason: 'modo_desconocido' });
+  }
   const stamp = `${Date.now()}_${process.hrtime()[1]}`;
   let inputPath;
   const cleanup = [];
