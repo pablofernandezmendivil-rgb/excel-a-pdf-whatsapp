@@ -13,10 +13,12 @@ mismo grupo. Nada de texto, solo el archivo.
   primera estaba oculta, salía ésa.
 - **Modo `cliente`** (`modo=cliente` en el cuerpo o en la URL de `/convert` y
   `/convert-and-send`; lo usa el cotizador para las cotizaciones al cliente de
-  SLH Client Quotes): salen **todas las pestañas visibles, en su orden**, las
-  ocultas se quitan (y si no se puede, no hay PDF), las filas con texto ajustado
-  **crecen** hasta que el texto quepa (nunca se encogen), y **no se traduce**.
-  Sin `modo`, todo es como siempre.
+  SLH Client Quotes): salen **todas las pestañas visibles, en su orden**; las
+  ocultas **no se quitan del libro** (no se imprimen, y las fórmulas que leen de
+  ellas siguen calculando: quitarlas volvía `#REF!` los precios); las filas con
+  texto ajustado **crecen** hasta que el texto quepa (nunca se encogen), y **no
+  se traduce**. Sin `modo`, todo es como siempre (`pruebas_convert.py` compara
+  ese camino llamada por llamada contra 21da4e5).
 - **Ancho de una hoja**: todas las columnas se ajustan al **ancho de una sola
   página**; hacia abajo usa las páginas que hagan falta. Se **respeta la
   orientación** original del archivo.

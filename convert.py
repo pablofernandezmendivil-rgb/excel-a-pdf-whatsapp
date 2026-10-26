@@ -6,6 +6,8 @@ Excel, dos modos:
     sola pagina (ancho y alto) si cabe sin encoger de mas.
   - "cliente": TODAS las pestanas visibles, en su orden, y las filas con texto
     ajustado crecen lo que haga falta para que no se corte (nunca se encogen).
+    Ninguna pestana se quita: las ocultas se quedan ocultas (no se imprimen) y
+    en el libro, para que las formulas que leen de ellas calculen.
   En los dos, una pestana oculta NUNCA sale en el PDF: ahi suelen ir costos,
   margenes y el proveedor. Si no se puede asegurar eso, en modo "cliente" no
   sale PDF (exit 1).
@@ -14,7 +16,9 @@ Contrasena -> exit 10.
 
 Uso: python3 convert.py <entrada> <salida.pdf> [--modo=cliente]
 """
+import math
 import os
+import re
 import sys
 import time
 import subprocess
@@ -198,39 +202,86 @@ def _es_visible(sheet, estricto):
         return True
 
 
+# Letras que ocupan el doble de ancho (chino, japones, coreano, ancho completo).
+ANCHAS = re.compile("[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]")
+# 1 punto tipografico en centesimas de milimetro (las unidades de UNO).
+PUNTO = 35.28
+
+
+def _alto_necesario(sheet, celda):
+    """Lo que pide (en 1/100 mm) el texto ajustado de una celda, contado a mano.
+
+    Caracteres por renglon segun el ancho de la columna, o del area combinada
+    (LibreOffice no mide las combinadas), y el tamano de la letra. Se cuenta de
+    mas a proposito: un renglon de sobra deja aire; uno de menos corta la
+    descripcion. Si la celda combina varias filas, no se calcula (0).
+    """
+    texto = celda.getString()
+    if not texto:
+        return 0
+    c0 = c1 = celda.CellAddress.Column
+    try:
+        cur = sheet.createCursorByRange(celda)
+        cur.collapseToMergedArea()
+        a = cur.getRangeAddress()
+        if a.EndRow > a.StartRow:
+            return 0
+        c0, c1 = a.StartColumn, a.EndColumn
+    except Exception:
+        pass
+    ancho = sum(sheet.Columns.getByIndex(c).Width for c in range(c0, c1 + 1)) - 100
+    pts = float(getattr(celda, "CharHeight", 0) or 10)
+    por_renglon = max(1, int(ancho / (pts * 0.5 * PUNTO)))
+    renglones = 0
+    for parrafo in texto.split("\n"):
+        largo = len(parrafo) + len(ANCHAS.findall(parrafo))
+        renglones += max(1, int(math.ceil(largo * 1.1 / por_renglon)))
+    return int(renglones * pts * 1.25 * PUNTO + 80)
+
+
 def _crece_filas(sheet):
     """Las filas con texto ajustado crecen hasta que el texto quepa.
 
-    Nunca se encogen: una fila alta puede traer una foto, y la altura optima
-    de LibreOffice no ve las fotos. Las filas ocultas no se tocan. (LibreOffice
-    tampoco mide las celdas combinadas: ese texto queda como venga.)
+    Dos cuentas y gana la mayor: la altura optima de LibreOffice y la de
+    _alto_necesario. Nunca se encogen: una fila alta puede traer una foto, y
+    la altura optima no ve las fotos. Las filas ocultas no se tocan.
     Devuelve cuantas filas crecieron.
     """
-    filas = set()
+    necesita = {}
     try:
         celdas = sheet.queryContentCells(TEXT_FLAGS).getCells().createEnumeration()
         while celdas.hasMoreElements():
             c = celdas.nextElement()
             try:
                 if c.IsTextWrapped:
-                    filas.add(c.CellAddress.Row)
+                    r = c.CellAddress.Row
+                    necesita[r] = max(necesita.get(r, 0), _alto_necesario(sheet, c))
             except Exception:
                 pass
     except Exception:
         return 0
     rows = sheet.Rows
     crecieron = 0
-    for r in sorted(filas):
+    for r in sorted(necesita):
         try:
             row = rows.getByIndex(r)
             if not row.IsVisible:
                 continue
             antes = row.Height
-            row.OptimalHeight = True
-            despues = row.Height
-            if despues < antes:
-                row.Height = antes
-            elif despues > antes:
+            # Un xlsx sin altos (openpyxl no los escribe) llega con las filas
+            # marcadas como optimas pero sin calcular, y volver a poner True no
+            # hace nada (CQ#303 de la prueba ciega). Se apaga y se prende.
+            optima = antes
+            try:
+                row.OptimalHeight = False
+                row.OptimalHeight = True
+                optima = row.Height
+            except Exception:
+                pass
+            final = max(antes, optima, necesita[r])
+            if row.Height != final:
+                row.Height = final
+            if final > antes:
                 crecieron += 1
         except Exception:
             pass
@@ -338,24 +389,19 @@ def _prepare_spreadsheet(doc, modo="primera"):
         _ajusta_pagina(doc, sheets.getByName(first), 0, True)
         return
 
-    # Modo cliente: todas las visibles, en su orden; las ocultas se QUITAN, y
-    # si no se puede asegurar que no quedo ninguna, no hay PDF.
+    # Modo cliente: todas las visibles, en su orden. Ninguna pestana se QUITA:
+    # la visible puede sacar sus precios de una oculta (costos en una, precios
+    # en otra), y quitarla los vuelve #REF! (CQ#305 de la prueba ciega). Las
+    # ocultas se quedan ocultas: LibreOffice no imprime ni exporta las ocultas.
     if not visibles:
         raise RuntimeError("el libro no tiene ninguna pestana visible")
-    for n in names:
-        if n not in visibles:
-            sheets.removeByName(n)
-    quedan = list(sheets.ElementNames)
-    if quedan != visibles or not all(_es_visible(sheets.getByName(n), True) for n in quedan):
-        raise RuntimeError("no pude quitar las pestanas ocultas")
-
     estilos = {}
-    for n in quedan:
+    for n in visibles:
         estilos.setdefault(sheets.getByName(n).PageStyle, []).append(n)
-    for i, n in enumerate(quedan):
+    for n in visibles:
         sheet = sheets.getByName(n)
         _crece_filas(sheet)
-        _ajusta_pagina(doc, sheet, i, len(estilos[sheet.PageStyle]) == 1)
+        _ajusta_pagina(doc, sheet, names.index(n), len(estilos[sheet.PageStyle]) == 1)
 
 
 def _lee_modo(args):
